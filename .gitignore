@@ -9,6 +9,7 @@
 vendor/
 coverage.out
 /dist
+/bin
 .envrc
 .DS_Store
 .talismanrc
