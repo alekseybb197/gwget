@@ -1,15 +1,22 @@
 # gwget
 A simple replacement for curl
 
-## Linux build
+## Usage
 
-```bash
-apt-get update
-apt-get install curl git make build-essential pkg-config libcurl4-openssl-dev -y
-curl -LO https://go.dev/dl/go1.20.6.linux-amd64.tar.gz
-rm -rf /usr/local/go && tar -C /usr/local -xzf go1.20.6.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
-git clone https://github.com/alekseybb197/gwget.git
-cd gwget
-make build
-```
+Usage of gwget:
+
+-c string - client string
+
+-f string - accepted format (default "html")
+
+-h string - host url  (default "http://127.0.0.1")
+
+-o string - output to file
+
+-s string - schema http/https (default "https")
+
+-t int - timeout ms (default 10000)
+
+-u bool - accept unsecure tls
+
+-v int - log verbosity (default 1)
