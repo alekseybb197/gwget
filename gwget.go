@@ -5,153 +5,72 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
-	"github.com/andelf/go-curl"
 	"github.com/heetch/confita"
 	confitaenv "github.com/heetch/confita/backend/env"
 	confitafile "github.com/heetch/confita/backend/file"
 	confitaflags "github.com/heetch/confita/backend/flags"
+	"github.com/schollz/progressbar/v3"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"regexp"
 	"time"
 )
 
 var version string
 
 type Config struct {
+	Client    string `config:"gwgclient,short=c,optional,description=client string"`
 	Host      string `config:"gwghost,short=h,required,description=host url"`
 	Format    string `config:"gwgformat,short=f,optional,description=accepted format"`
 	Output    string `config:"gwgoutput,short=o,optional,description=output to file"`
-	Redirect  bool   `config:"gwgredirect,short=r,optional,description=redirect enabled"`
+	Schema    string `config:"gwgschema,short=s,optional,description=schema http/https"`
 	Timeout   int    `config:"gwgtimeout,short=t,optional,description=timeout ms"`
-	Unsecure  bool   `config:"gwgunsecure,short=s,optional,description=accept unsecure tls"`
+	Unsecure  bool   `config:"gwgunsecure,short=u,optional,description=accept unsecure tls"`
 	Verbosity int    `config:"gwgverbosity,short=v,optional,description=log verbosity"`
 }
 
 // default values
 var cfg = Config{
-	Host:      "http://127.0.0.1",
-	Format:    "html",
-	Output:    "",
-	Redirect:  false,
-	Timeout:   100,
-	Unsecure:  false,
-	Verbosity: 0,
+	Client:   "", // i.e. "curl/7.79.1"
+	Host:     "http://127.0.0.1",
+	Format:   "html",
+	Output:   "",
+	Schema:   "https", // default schema
+	Timeout:  10000,
+	Unsecure: false,
+	// 0 - no log, 1 - progress bar, 2 - info, 3 - debug
+	Verbosity: 1,
 }
 
-// input: easy curl instance; output: response code, relocation string
-func rescodecheck(easy *curl.CURL) (int, string) {
-	rescode := 0
-	relocation := ""
-	info, err := easy.Getinfo(curl.INFO_RESPONSE_CODE)
+var webClient = http.Client{
+	Timeout: time.Millisecond * time.Duration(cfg.Timeout),
+}
+
+var media string
+
+func webrequest(url string) *http.Response {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		log.Fatalln(err)
 	}
-	rescode = info.(int)
+	req.Header.Set("User-Agent", cfg.Client)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Accept", media)
 
-	// got relocation response
-	if rescode == 302 {
-		redirect, err := easy.Getinfo(curl.INFO_REDIRECT_URL)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		relocation = redirect.(string)
+	if cfg.Verbosity > 2 {
+		fmt.Printf("Request Headers: %+v\n", req.Header)
 	}
-	return rescode, relocation
-}
 
-func writefile(ptr []byte, userdata interface{}) bool {
-	file := userdata.(*os.File)
-	if _, err := file.Write(ptr); err != nil {
-		return false
+	res, err := webClient.Do(req)
+	if err != nil {
+		log.Fatalln(err)
 	}
-	return true
-}
-
-func getdata(ptr []byte, userdata interface{}) bool {
-	ch, ok := userdata.(chan string)
-	if ok {
-		ch <- string(ptr)
-		return true
-	} else {
-		log.Fatalln("ERROR getdata")
-	}
-	return false
-}
-
-var started = int64(0)
-
-func showprogress(dltotal, dlnow, ultotal, ulnow float64, userdata interface{}) bool {
-
-	if started == 0 {
-		started = time.Now().Unix()
-	}
-	fmt.Printf("Downloaded: %3.2f%%, Speed: %.1fKiB/s \r", dlnow/dltotal*100, dlnow/1000/float64((time.Now().Unix()-started)))
-	return true
-}
-
-// input: media type, file name; output: response code, relocation string
-func httpget(httpurl string, media string, filename string) (int, string, string) {
-	rescode := 0
-	relocation := ""
-	resdata := ""
-
-	easy := curl.EasyInit()
-	defer easy.Cleanup()
-
-	if easy != nil {
-		easy.Setopt(curl.OPT_URL, httpurl)
-
-		easy.Setopt(curl.OPT_SSL_VERIFYPEER, cfg.Unsecure)
-		easy.Setopt(curl.OPT_ENCODING, "Accept-Encoding: gzip, deflate")
-
-		easy.Setopt(curl.OPT_HTTPHEADER, []string{"Accept: " + media})
-		easy.Setopt(curl.OPT_USERAGENT, "")
-
-		if cfg.Verbosity > 1 { // trace all
-			easy.Setopt(curl.OPT_VERBOSE, true)
-		}
-
-		if filename != "" { // download file
-			easy.Setopt(curl.OPT_WRITEFUNCTION, writefile)
-			fp, _ := os.OpenFile(cfg.Output, os.O_WRONLY|os.O_CREATE, 0644)
-			defer fp.Close() // defer close
-			easy.Setopt(curl.OPT_WRITEDATA, fp)
-
-			if cfg.Verbosity > 0 { // show progress bar
-				easy.Setopt(curl.OPT_NOPROGRESS, false)
-				easy.Setopt(curl.OPT_PROGRESSFUNCTION, showprogress)
-			}
-
-			if err := easy.Perform(); err != nil {
-				log.Fatalln(err)
-			}
-			rescode, relocation = rescodecheck(easy)
-
-		} else { // get http data
-
-			easy.Setopt(curl.OPT_WRITEFUNCTION, getdata)
-			// data reading process
-			ch := make(chan string, 1024)
-			go func(ch chan string) {
-				for {
-					resdata = <-ch
-				}
-			}(ch)
-			easy.Setopt(curl.OPT_WRITEDATA, ch)
-
-			if err := easy.Perform(); err != nil {
-				log.Fatalln(err)
-			}
-
-			time.Sleep(time.Duration(cfg.Timeout) * time.Millisecond) // wait gorotine
-			rescode, relocation = rescodecheck(easy)
-		}
-	} else {
-		log.Fatalln("ERROR curl easy init")
-	}
-	return rescode, relocation, resdata
+	return res
 }
 
 func main() {
@@ -169,7 +88,6 @@ func main() {
 	}
 
 	// set response accepted
-	var media string
 	switch cfg.Format {
 	case "json":
 		media = "application/json"
@@ -179,19 +97,79 @@ func main() {
 		media = "text/html"
 	}
 
-	resdata := ""
-	rescode, relocstr, resdata := httpget(cfg.Host, media, cfg.Output)
-	// a maximum of two relocations
-	if rescode == 302 {
-		rescode, relocstr, resdata = httpget(relocstr, media, cfg.Output)
-		if rescode == 302 {
-			rescode, relocstr, resdata = httpget(relocstr, media, cfg.Output)
+	url := cfg.Host
+	// fix schema if needed
+	schema, _ := regexp.Compile(`^http.://`) // schema mask
+	if !schema.MatchString(cfg.Host) {
+		url = "https://" + cfg.Host
+	}
+	if cfg.Verbosity > 1 {
+		fmt.Printf("Url: %+v\n", url)
+	}
+
+	if cfg.Output != "" {
+		webClient.Timeout = -1 // disable timeout
+	}
+
+	res := webrequest(url)
+	if res.Body == nil {
+		log.Fatalln("Error: body is nil")
+	}
+	defer res.Body.Close()
+
+	if cfg.Verbosity > 2 {
+		fmt.Printf("Response StatusCode %+v\n", res.StatusCode)
+		fmt.Printf("Response Header %+v\n", res.Header)
+	}
+
+	// catch fail code
+	if res.StatusCode != 200 && res.StatusCode != 400 && res.StatusCode != 404 && res.StatusCode != 401 {
+		log.Fatalf("failed to fetch data: %s", res.Status)
+	}
+
+	// choose properly context reader
+	var reader io.ReadCloser
+	switch res.Header.Get("Content-Encoding") {
+	case "gzip":
+		reader, err = gzip.NewReader(res.Body)
+		defer reader.Close()
+	default:
+		reader = res.Body
+	}
+
+	if cfg.Output == "" {
+		// fetch web content
+
+		bytesbody, readErr := io.ReadAll(reader)
+		if readErr != nil {
+			log.Fatalln(readErr)
+		}
+		fmt.Print(string(bytesbody))
+
+	} else {
+		// save to file
+		file, err := os.Create(cfg.Output)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		defer file.Close()
+
+		var size int64
+		if cfg.Verbosity > 0 {
+			bar := progressbar.DefaultBytes(
+				res.ContentLength,
+				"downloading",
+			)
+			size, err = io.Copy(io.MultiWriter(file, bar), reader)
+		} else {
+			size, err = io.Copy(file, reader)
+		}
+		if err != nil {
+			log.Fatalln(err)
+		}
+		if cfg.Verbosity > 1 {
+			fmt.Printf("File %s with %d bytes downloaded.\n", cfg.Output, size)
 		}
 	}
-	if rescode == 200 && cfg.Output == "" {
-		print(resdata)
-	}
-	if rescode != 200 {
-		println("ERROR:", rescode)
-	}
+
 }
